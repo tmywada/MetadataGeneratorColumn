@@ -1,4 +1,4 @@
-# MetadataGeneratorDatabase
+MetadataGeneratorDatabase
 ======================================
 
 .. |buildstatus|_

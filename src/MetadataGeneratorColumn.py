@@ -1,6 +1,8 @@
 # =================================================================================
-#                      Metadata Generator from Database (MGDB)
+#                      Metadata Generator from Column (MGC)
 # =================================================================================
+#
+# TODO: convert min/max values to hashvalues
 #
 import hashlib
 import bz2
@@ -19,13 +21,51 @@ version = '0.0.1'
 
 class Utilities:
 
+    def __init__(self):
+        """
+        """
+        self.sample_url = 'https://data.cityofnewyork.us/resource/erm2-nwe9.json'
+
     def generate_chunks(self, values:list, chunk_size:int):
         """
         ref: https://stackoverflow.com/a/434328
         """
         return (values[pos:pos + chunk_size] for pos in range(0, len(values), chunk_size))
 
+    def load_sample_table(self):
+        """
+        """
+        # --- required packages
+        import requests
+        import json
+
+        # --- API request
+        res = requests.get(self.sample_url)
+
+        # --- JSON from requested output
+        res_json = json.loads( res.text )
+
+        # --- dataframe
+        df = pd.DataFrame.from_dict(res_json, orient = 'columns', dtype = str )
+
+        # --- drop na
+        df.dropna()
+
+        return df
+
+    def preprocess_values(self, values:list):
+        """
+        """
+        _values = [v for v in values if pd.isnull(v) == False]
+        num_null = len(values) - len(_values)
+        return (_values, num_null)
+
 class GenerateMetadataValues(Utilities):
+
+    def __init__(self):
+        self.num_samples = 20
+        self.chunk_size = 10
+        self.stats_per_dtype = True
 
     def classify_datatype_and_length(self, value:str):
         """
@@ -115,7 +155,7 @@ class GenerateMetadataValues(Utilities):
         sample_range = np.nanmax(values) - np.nanmin(values)
 
         if num_samples is None:
-            num_samples = 20
+            num_samples = self.num_samples
 
         # --- define x
         x = np.linspace(
@@ -143,21 +183,30 @@ class GenerateMetadataValues(Utilities):
         
         return (x, y)
 
-    def generate_metadata(self, values:list, stats_per_dtype:bool=True, chunk_size:int=10):
+    def generate_metadata(self, values:list, stats_per_dtype:bool=None, chunk_size:int=None):
         """
         """
         # --- initialization
         res = []
 
+        if chunk_size == None:
+            chunk_size = self.chunk_size
+
+        if stats_per_dtype == None:
+            stats_per_dtype = self.stats_per_dtype
+
+        # --- preprocess
+        _values, num_null = self.preprocess_values(values)
+
         # --- aggregation
-        _res = self.aggregate_datatype_and_length(values)
+        _res = self.aggregate_datatype_and_length(_values)
 
         # --- stats using pandas
         df = pd.DataFrame.from_dict(_res, orient = 'columns')
 
         # ---
         if stats_per_dtype:
-            _res_stats = self.calculate_stats_per_datatype(values, chunk_size)
+            _res_stats = self.calculate_stats_per_datatype(_values, chunk_size)
 
         for _dtype in df.datatype.unique():
 
@@ -179,22 +228,24 @@ class GenerateMetadataValues(Utilities):
 
             length_median = np.median(_values_inflated)
 
-            if len(set(_values_inflated)) == 1:
-                x = _values_inflated[0]
-                y = 1
-            else:
-                x,y = self.generate_kde_distribution(_values_inflated)
-
             # --- output
             _res = {
                 'datatype': _dtype,
                 'count': count_dtype,
+                'num_null': num_null,
+                'num_distinct': len(set(_values)),
                 'length_min': length_min,
                 'length_max': length_max,
                 'length_mean': length_mean,
-                'length_median': length_median,
-                'kde_distribution': (x,y)            
+                'length_median': length_median      
             }
+
+            # --- add kde profile
+            if len(set(_values_inflated)) != 1:
+                x,y = self.generate_kde_distribution(_values_inflated)
+                _res['length_kde_distribution'] = (x,y)
+            else:
+                _res['length_kde_distribution'] = None
 
             # --- add stats
             if stats_per_dtype:
@@ -205,24 +256,32 @@ class GenerateMetadataValues(Utilities):
 
 class GenerateMetadataHashvalues(Utilities):
 
-    def retrieve_hashvalue_partition(self, hash_digest:bytes, num_digits_partition:int=2, num_digits:int=4):
+    def __init__(self):
         """
         num_digits is 4 since roaringbitmap can handle only 32 bit integers.
         """
-        end_digits = num_digits_partition + num_digits
+        self.num_digits_partition = 2
+        self.num_digits = 4
+        self.salt = '4649'
+        self.digest_size = 9
+
+    def retrieve_hashvalue_partition(self, hash_digest:bytes):
+        """
+        """
+        end_digits = self.num_digits_partition + self.num_digits
         res = (
-            int.from_bytes(hash_digest[:num_digits_partition], 'little'),
-            int.from_bytes(hash_digest[num_digits_partition:end_digits], 'little')
+            int.from_bytes(hash_digest[:self.num_digits_partition], 'little'),
+            int.from_bytes(hash_digest[self.num_digits_partition:end_digits], 'little')
         )
         return res
 
-    def ingest_value(self, value:bytes, digest_dize:int=9, salt:str='4649'):
+    def ingest_value(self, value:bytes):
         """
         """
         hash_digest = hashlib.blake2b(
             value,
-            digest_size=digest_dize,
-            salt = salt.encode()
+            digest_size = self.digest_size,
+            salt = self.salt.encode()
         ).digest()
         return hash_digest
 
@@ -244,8 +303,10 @@ class GenerateMetadataHashvalues(Utilities):
 
             _res = defaultdict(list)
 
+            _values, _ = self.preprocess_values(chunk)
+
             # --- 
-            for value in chunk:
+            for value in _values:
                 tmp = self.generate_hashvalue_parition(value.encode())
                 buckets[tmp[0]].append(tmp[1])          
 
@@ -303,6 +364,7 @@ class GenerateMetadataString:
 
     def preprocess_string(self, input_string:str):
         """
+        standardization, cleanup, etc.
         """
         # --- standardization
         input_string = input_string.lower()
@@ -346,47 +408,72 @@ class GenerateMetadataString:
         """
         return self.process_string( self.preprocess_string( input_string), remove_duplicated )
 
-# class GenerateMetadataColumn:
-#     """
-#     """
+class GenerateMetadataColumn:
+    """
+    """
+    def __init__(self):
+        # --- True -> keep only aggregated hashvalue
+        self.simple_bitmap = True
+        self.directory_bitmap = './data'
+        self.obj_string = GenerateMetadataString()
+        self.obj_value  = GenerateMetadataValues()
+        self.obj_bitmap = GenerateMetadataHashvalues()
 
-# class GenerateMetadataTable:
-#     """
-#     """
+    def process_column_name(self, column_name:str):
+        """
+        """
+        # --- 
+        return self.obj_string.generate_metadata_string(column_name)
 
-# class GenerateMeatdataSchema:
-#     """
-#     """
+    def process_values(self, values:list, simple_bitmap:bool=None, directory_bitmap:str=None, save_bitmap:bool=None):
+        """
+        values should be string
+        """
+        # --- initialization
+        if simple_bitmap == None:
+            simple_bitmap = self.simple_bitmap
 
-# class GenerateMetadataDatabase:
-#     """
-#     """
+        if directory_bitmap == None:
+            directory_bitmap == self.directory_bitmap
+            save_bitmap = False
 
+        # --- process
+        res_value  = self.obj_value.generate_metadata(values)
+        res_bitmap = self.obj_bitmap.generate_bitmaps(values)
 
-if __name__ == '__main__':
+        # --- partitioned or aggregated hashvalues
+        if simple_bitmap:
+            hashvalues = res_bitmap[1]
+        else:
+            hashvalues = res_bitmap[0]
 
+        if save_bitmap:
+            self.obj_bitmap.save_pickled_bz2_file(hashvalues, directory_bitmap)
+
+        return (res_value, hashvalues)
+
+def generate_metadata_column(column_name:str, values:list, simple_bitmap:bool=None, directory_bitmap:str=None, save_bitmap:bool=None):
+    """
+    """
     # --- initialization
-    arg_parser = argparse.ArgumentParser()
+    obj = GenerateMetadataColumn()
 
-    # # --- load parameters
-    # arg_parser.add_argument('--file_path', type=str)
-    # arg_parser.add_argument('--idx_query', type=int, default = 0)
+    # --- process column name
+    res_column_name = obj.process_column_name(column_name)
 
-    # # --- parser arguments
-    # options = arg_parser.parse_args()
+    # --- process values
+    res_value, res_bitmap = obj.process_values(
+        values = values,
+        simple_bitmap = simple_bitmap,
+        directory_bitmap = directory_bitmap,
+        save_bitmap = save_bitmap
+    )
 
-    # # --- single query
-    # res = generate_metadata_from_hive_query(
-    #     file_path = options.file_path,
-    #     idx_query = options.idx_query
-    # )
+    # --- store results
+    res = {
+        'column_name': res_column_name,
+        'values': res_value,
+        'bitmap': res_bitmap
+    }
 
-    # # # --- multple queries   
-    # # res = generate_metadata_from_hive_queries(
-    # #     file_path = file_path
-    # # )
-
-    # print(res[0]['query'])
-    # print('---')
-    # print(res[0]['metadata_query'])
-
+    return res
