@@ -53,7 +53,7 @@ class Utilities:
 
         return df
 
-    def preprocess_values(self, values:list):
+    def exclude_missing_values(self, values:list):
         """
         """
         _values = [v for v in values if pd.isnull(v) == False]
@@ -254,7 +254,7 @@ class GenerateMetadataValues(Utilities):
             res.append(_res)
         return res
 
-class GenerateMetadataHashvalues(Utilities):
+class GenerateHashvalues(Utilities):
 
     def __init__(self):
         """
@@ -275,9 +275,14 @@ class GenerateMetadataHashvalues(Utilities):
         )
         return res
 
-    def ingest_value(self, value:bytes):
+    def digest_value(self, value:str):
         """
         """
+        # --- cast values to bytes type
+        if isinstance(value, bytes) == False:
+            value = value.encode()
+
+        # --- digest 
         hash_digest = hashlib.blake2b(
             value,
             digest_size = self.digest_size,
@@ -288,7 +293,7 @@ class GenerateMetadataHashvalues(Utilities):
     def generate_hashvalue_parition(self, value:bytes):
         """
         """
-        return self.retrieve_hashvalue_partition( self.ingest_value(value) )
+        return self.retrieve_hashvalue_partition( self.digest_value(value) )
 
     def generate_bitmaps(self, values:list, chunk_size:int=10):
         """
@@ -303,12 +308,12 @@ class GenerateMetadataHashvalues(Utilities):
 
             _res = defaultdict(list)
 
-            _values, _ = self.preprocess_values(chunk)
+            _values, _ = self.exclude_missing_values(chunk)
 
             # --- 
             for value in _values:
-                tmp = self.generate_hashvalue_parition(value.encode())
-                buckets[tmp[0]].append(tmp[1])          
+                bucket_id, value_hash = self.generate_hashvalue_parition(value.encode())
+                buckets[bucket_id].append(value_hash)          
 
         # --- roaringbitmaps + aggregated hashvalues
         for key, values_h in buckets.items():
@@ -417,7 +422,7 @@ class GenerateMetadataColumn:
         self.directory_bitmap = './data'
         self.obj_string = GenerateMetadataString()
         self.obj_value  = GenerateMetadataValues()
-        self.obj_bitmap = GenerateMetadataHashvalues()
+        self.obj_bitmap = GenerateHashvalues()
 
     def process_column_name(self, column_name:str):
         """
